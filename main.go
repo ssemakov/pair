@@ -298,15 +298,55 @@ func resumeArgv(cli, sessionID string) []string {
 	}
 }
 
-// resumeExec replaces the current process with the CLI's resume invocation.
+// resumeExec runs the CLI's resume invocation under a PTY so we can scan
+// for an updated session id on exit and index it if it's not already known.
 func resumeExec(s Session) error {
-	bin, err := exec.LookPath(s.CLI)
-	if err != nil {
+	if _, err := exec.LookPath(s.CLI); err != nil {
 		return fmt.Errorf("%s: not found in PATH", s.CLI)
 	}
 	argv := resumeArgv(s.CLI, s.CLISessionID)
-	debugf("exec %s %v", bin, argv)
-	return syscall.Exec(bin, argv, os.Environ())
+	debugf("wrap-resume %v", argv)
+
+	startedAt := time.Now()
+	captured, runErr := runWrapped(s.CLI, argv[1:])
+	debugf("resume exited: captured_session_id=%q err=%v elapsed=%s", captured, runErr, time.Since(startedAt))
+
+	newID := captured
+	if newID == "" {
+		newID = s.CLISessionID
+	}
+
+	db, err := openIndex()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pair: open index: %v (resumed session %s left unindexed)\n", err, newID)
+		return runErr
+	}
+	defer db.Close()
+
+	if _, err := findSession(db, newID); err == nil {
+		debugf("resumed session %s already indexed", newID)
+		return runErr
+	}
+
+	// By design: a resumed session stays attached to the repo+branch it was
+	// originally indexed against, even if the user has since switched
+	// branches or cwd. Resuming is a continuation, not a new session, so we
+	// deliberately do NOT call snapshotRepo() here.
+	ns := Session{
+		ID:           uuid.NewString(),
+		CLI:          s.CLI,
+		CLISessionID: newID,
+		Repo:         s.Repo,
+		Branch:       s.Branch,
+		StartedAt:    startedAt,
+	}
+	if err := insertSession(db, ns); err != nil {
+		fmt.Fprintf(os.Stderr, "pair: insert resumed session: %v\n", err)
+		return runErr
+	}
+	debugf("indexed resumed session pair_id=%s cli_session_id=%s", ns.ID, newID)
+	fmt.Fprintf(os.Stderr, "pair: indexed %s session %s on %s@%s\n", s.CLI, newID, shortRepo(s.Repo), s.Branch)
+	return runErr
 }
 
 // execPassthrough runs cli with stdio inherited; used when we can't index.
