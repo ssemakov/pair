@@ -286,13 +286,25 @@ func cmdForget(args []string) error {
 	return nil
 }
 
-// resumeExec replaces the current process with `<cli> resume <cli_session_id>`.
+// resumeArgv returns the argv used to resume a session for a given CLI.
+// Different CLIs spell it differently: codex uses `codex resume <id>`,
+// claude uses `claude --resume <id>`.
+func resumeArgv(cli, sessionID string) []string {
+	switch cli {
+	case "claude":
+		return []string{cli, "--resume", sessionID}
+	default:
+		return []string{cli, "resume", sessionID}
+	}
+}
+
+// resumeExec replaces the current process with the CLI's resume invocation.
 func resumeExec(s Session) error {
 	bin, err := exec.LookPath(s.CLI)
 	if err != nil {
 		return fmt.Errorf("%s: not found in PATH", s.CLI)
 	}
-	argv := []string{s.CLI, "resume", s.CLISessionID}
+	argv := resumeArgv(s.CLI, s.CLISessionID)
 	debugf("exec %s %v", bin, argv)
 	return syscall.Exec(bin, argv, os.Environ())
 }
