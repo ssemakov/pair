@@ -1,5 +1,5 @@
 BINARY := pair
-PREFIX ?= /usr/local
+PREFIX ?= ~
 
 .PHONY: all build install clean test fmt vet tidy
 

@@ -19,7 +19,7 @@ func printSessions(rows []Session) {
 			s.StartedAt.Local().Format(time.RFC3339),
 			shortRepo(s.Repo),
 			s.Branch,
-			truncID(s.CLISessionID),
+			s.CLISessionID,
 			prSuffix(s.PRURL),
 		)
 	}
@@ -36,13 +36,6 @@ func shortRepo(p string) string {
 		}
 	}
 	return filepath.Base(p)
-}
-
-func truncID(s string) string {
-	if len(s) > 12 {
-		return s[:8] + "…"
-	}
-	return s
 }
 
 func prSuffix(url string) string {

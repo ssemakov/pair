@@ -25,21 +25,24 @@ import (
 //
 // The capture group is what gets stored as cli_session_id.
 var cliPattern = map[string]string{
-	"codex":  `(?i)session(?:[ _-]?id)?[:\s=]+([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})`,
-	"claude": `(?i)session(?:[ _-]?id)?[:\s=]+([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})`,
+	"codex":  `(?i)(?:session(?:[ _-]?id)?[:\s=]+|\bresume\s+)([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})`,
+	"claude": `(?i)(?:session(?:[ _-]?id)?[:\s=]+|--resume\s+)([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})`,
 }
 
 func patternFor(cli string) (*regexp.Regexp, error) {
 	if v := os.Getenv("PAIR_" + cli + "_PATTERN"); v != "" {
+		debugf("pattern source=env PAIR_%s_PATTERN", cli)
 		return regexp.Compile(v)
 	}
 	if v := os.Getenv("PAIR_" + toUpperASCII(cli) + "_PATTERN"); v != "" {
+		debugf("pattern source=env PAIR_%s_PATTERN", toUpperASCII(cli))
 		return regexp.Compile(v)
 	}
 	p, ok := cliPattern[cli]
 	if !ok {
 		return nil, fmt.Errorf("no session-id pattern configured for cli %q", cli)
 	}
+	debugf("pattern source=builtin cli=%s pattern=%s", cli, p)
 	return regexp.Compile(p)
 }
 
@@ -148,7 +151,11 @@ func (s *sessionScanner) Write(p []byte) (int, error) {
 	}
 	// Find the last match in the current buffer.
 	if m := s.pat.FindAllSubmatch(s.tail, -1); len(m) > 0 {
-		s.last = string(m[len(m)-1][1])
+		newID := string(m[len(m)-1][1])
+		if newID != s.last {
+			debugf("session-id captured: %s", newID)
+			s.last = newID
+		}
 	}
 	return len(p), nil
 }

@@ -15,8 +15,8 @@ import (
 const usage = `pair — link agentic-coding sessions to git branches
 
 usage:
-  pair codex [args...]                 wrap codex, capture session
-  pair claude [args...]                wrap claude, capture session
+  pair [-v|--verbose] codex [args...]  wrap codex, capture session
+  pair [-v|--verbose] claude [args...] wrap claude, capture session
 
   pair list [--here|--repo|--branch=N] list sessions
   pair last [n]                        resume the n-th most-recent session on this repo+branch (default 1)
@@ -24,17 +24,42 @@ usage:
   pair register --cli C --session S    insert a session manually
   pair forget <id>                     remove a session from the index
 
+global flags:
+  -v, --verbose        emit debug output to stderr (also: PAIR_VERBOSE=1)
+
 env:
   PAIR_DATA_DIR        override storage dir (default: $XDG_DATA_HOME/pair or ~/.local/share/pair)
   PAIR_<CLI>_PATTERN   override the regex used to scrape the session id from <CLI>'s stdout
+  PAIR_VERBOSE         if set to a non-empty value, behaves like --verbose
 `
 
+var verbose bool
+
+func debugf(format string, args ...any) {
+	if !verbose {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "pair[debug]: "+format+"\n", args...)
+}
+
 func main() {
-	if len(os.Args) < 2 {
+	if v := os.Getenv("PAIR_VERBOSE"); v != "" && v != "0" {
+		verbose = true
+	}
+	rest := make([]string, 0, len(os.Args)-1)
+	for _, a := range os.Args[1:] {
+		if a == "-v" || a == "--verbose" {
+			verbose = true
+			continue
+		}
+		rest = append(rest, a)
+	}
+	if len(rest) < 1 {
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
 	}
-	cmd, args := os.Args[1], os.Args[2:]
+	cmd, args := rest[0], rest[1:]
+	debugf("cmd=%q args=%v", cmd, args)
 
 	var err error
 	switch cmd {
@@ -70,9 +95,12 @@ func cmdWrap(cli string, args []string) error {
 		fmt.Fprintf(os.Stderr, "pair: %v — running %s without indexing\n", err, cli)
 		return execPassthrough(cli, args)
 	}
+	debugf("repo=%s branch=%s pr_url=%q", info.Repo, info.Branch, info.PRURL)
 
 	startedAt := time.Now()
+	debugf("launching %s with %d args", cli, len(args))
 	cliSessionID, runErr := runWrapped(cli, args)
+	debugf("wrapped %s exited: session_id=%q err=%v elapsed=%s", cli, cliSessionID, runErr, time.Since(startedAt))
 
 	if cliSessionID == "" {
 		fmt.Fprintf(os.Stderr, "pair: could not detect %s session id (set PAIR_%s_PATTERN if its output format changed); not indexing this run\n", cli, toUpperASCII(cli))
@@ -99,6 +127,7 @@ func cmdWrap(cli string, args []string) error {
 		fmt.Fprintf(os.Stderr, "pair: insert session: %v\n", err)
 		return runErr
 	}
+	debugf("inserted session pair_id=%s", s.ID)
 	fmt.Fprintf(os.Stderr, "pair: indexed %s session %s on %s@%s\n", cli, cliSessionID, shortRepo(info.Repo), info.Branch)
 	return runErr
 }
@@ -264,6 +293,7 @@ func resumeExec(s Session) error {
 		return fmt.Errorf("%s: not found in PATH", s.CLI)
 	}
 	argv := []string{s.CLI, "resume", s.CLISessionID}
+	debugf("exec %s %v", bin, argv)
 	return syscall.Exec(bin, argv, os.Environ())
 }
 
