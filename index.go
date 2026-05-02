@@ -128,6 +128,87 @@ func findSession(db *sql.DB, idOrCLISession string) (Session, error) {
 	return s, nil
 }
 
+// pruneSessions keeps the most-recent session per (repo, branch, cli) within
+// the given filter scope and deletes the rest. Returns the sessions that
+// were removed, in the same order list-style commands would print them
+// (most recent first).
+func pruneSessions(db *sql.DB, f listFilter) ([]Session, error) {
+	args := []any{}
+	where := ""
+	add := func(clause string, v any) {
+		if where == "" {
+			where = " WHERE "
+		} else {
+			where += " AND "
+		}
+		where += clause
+		args = append(args, v)
+	}
+	if f.Repo != "" {
+		add("repo = ?", f.Repo)
+	}
+	if f.Branch != "" {
+		add("branch = ?", f.Branch)
+	}
+	if f.CLI != "" {
+		add("cli = ?", f.CLI)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	selectQ := `WITH ranked AS (
+	    SELECT id, ROW_NUMBER() OVER (PARTITION BY repo, branch, cli ORDER BY started_at DESC, id DESC) AS rn
+	    FROM sessions` + where + `
+	)
+	SELECT s.id, s.cli, s.cli_session_id, s.repo, s.branch, COALESCE(s.pr_url, ''), s.started_at
+	FROM sessions s
+	JOIN ranked r ON r.id = s.id
+	WHERE r.rn > 1
+	ORDER BY s.started_at DESC`
+	rows, err := tx.Query(selectQ, args...)
+	if err != nil {
+		return nil, err
+	}
+	var pruned []Session
+	for rows.Next() {
+		var s Session
+		var ts int64
+		if err := rows.Scan(&s.ID, &s.CLI, &s.CLISessionID, &s.Repo, &s.Branch, &s.PRURL, &ts); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		s.StartedAt = time.Unix(ts, 0)
+		pruned = append(pruned, s)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(pruned) > 0 {
+		ids := make([]any, len(pruned))
+		placeholders := ""
+		for i, s := range pruned {
+			if i > 0 {
+				placeholders += ","
+			}
+			placeholders += "?"
+			ids[i] = s.ID
+		}
+		if _, err := tx.Exec("DELETE FROM sessions WHERE id IN ("+placeholders+")", ids...); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return pruned, nil
+}
+
 func nullIfEmpty(s string) any {
 	if s == "" {
 		return nil

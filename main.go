@@ -24,6 +24,12 @@ usage:
   pair resume <id>                     resume by pair-id or cli-session-id
   pair register --cli C --session S    insert a session manually
   pair forget <id>                     remove a session from the index
+  pair prune [--branch=N|--repo[=P]|--all]
+                                       keep the most-recent session per repo+branch+cli and forget the rest
+                                       (default scope: current repo+branch;
+                                        --branch=N: this repo, branch N;
+                                        --repo: current repo, all branches; --repo=P: repo P, all branches;
+                                        --all: every repo+branch)
 
 global flags:
   -v, --verbose        emit debug output to stderr (also: PAIR_VERBOSE=1)
@@ -35,6 +41,28 @@ env:
 `
 
 var verbose bool
+
+// optStringFlag is a string flag whose value is optional. Bare `--name`
+// records that the flag was set without a value (set=true, explicit=false).
+// `--name=value` records the value (set=true, explicit=true).
+type optStringFlag struct {
+	set      bool
+	explicit bool
+	value    string
+}
+
+func (o *optStringFlag) String() string     { return o.value }
+func (o *optStringFlag) IsBoolFlag() bool   { return true }
+func (o *optStringFlag) Set(s string) error {
+	o.set = true
+	// When IsBoolFlag is true, the flag pkg passes "true" for bare invocations.
+	if s == "true" {
+		return nil
+	}
+	o.explicit = true
+	o.value = s
+	return nil
+}
 
 func debugf(format string, args ...any) {
 	if !verbose {
@@ -76,6 +104,8 @@ func main() {
 		err = cmdRegister(args)
 	case "forget":
 		err = cmdForget(args)
+	case "prune":
+		err = cmdPrune(args)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return
@@ -297,6 +327,73 @@ func cmdForget(args []string) error {
 		return fmt.Errorf("no session matched %q", args[0])
 	}
 	fmt.Printf("forgot %d session(s)\n", n)
+	return nil
+}
+
+func cmdPrune(args []string) error {
+	fs := flag.NewFlagSet("prune", flag.ContinueOnError)
+	// repo is an optional-value flag: `--repo` alone means "current repo,
+	// all branches"; `--repo=PATH` targets a specific repo path.
+	var repo optStringFlag
+	fs.Var(&repo, "repo", "all branches of the given repo path (omit value to use current repo)")
+	all := fs.Bool("all", false, "every repo + branch (keep latest per repo+branch)")
+	branch := fs.String("branch", "", "current repo, this specific branch (default: current branch)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	switch {
+	case repo.set && *all:
+		return fmt.Errorf("prune: --repo and --all are mutually exclusive")
+	case *branch != "" && *all:
+		return fmt.Errorf("prune: --branch and --all are mutually exclusive")
+	case *branch != "" && repo.set:
+		return fmt.Errorf("prune: --branch and --repo are mutually exclusive")
+	}
+
+	f := listFilter{}
+	switch {
+	case *all:
+		// no filter
+	case repo.set:
+		if repo.explicit {
+			f.Repo = repo.value
+		} else {
+			info, err := snapshotRepo()
+			if err != nil {
+				return err
+			}
+			f.Repo = info.Repo
+		}
+	default:
+		info, err := snapshotRepo()
+		if err != nil {
+			return err
+		}
+		f.Repo = info.Repo
+		if *branch != "" {
+			f.Branch = *branch
+		} else {
+			f.Branch = info.Branch
+		}
+	}
+	debugf("prune scope: repo=%q branch=%q", f.Repo, f.Branch)
+
+	db, err := openIndex()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	pruned, err := pruneSessions(db, f)
+	if err != nil {
+		return err
+	}
+	if len(pruned) == 0 {
+		fmt.Println("nothing to prune")
+		return nil
+	}
+	printSessions(pruned)
+	fmt.Printf("\npruned %d session(s)\n", len(pruned))
 	return nil
 }
 
