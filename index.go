@@ -66,6 +66,7 @@ func deleteSession(db *sql.DB, id string) (int64, error) {
 type listFilter struct {
 	Repo   string
 	Branch string
+	CLI    string
 }
 
 func listSessions(db *sql.DB, f listFilter) ([]Session, error) {
@@ -86,6 +87,9 @@ func listSessions(db *sql.DB, f listFilter) ([]Session, error) {
 	}
 	if f.Branch != "" {
 		add("branch = ?", f.Branch)
+	}
+	if f.CLI != "" {
+		add("cli = ?", f.CLI)
 	}
 	q += where + " ORDER BY started_at DESC"
 	rows, err := db.Query(q, args...)

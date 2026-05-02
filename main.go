@@ -19,7 +19,8 @@ usage:
   pair [-v|--verbose] claude [args...] wrap claude, capture session
 
   pair list [--here|--repo|--branch=N] list sessions
-  pair last [n]                        resume the n-th most-recent session on this repo+branch (default 1)
+  pair last [n] [claude|codex]         resume the n-th most-recent session on this repo+branch (default 1),
+                                       optionally filtered by agent
   pair resume <id>                     resume by pair-id or cli-session-id
   pair register --cli C --session S    insert a session manually
   pair forget <id>                     remove a session from the index
@@ -173,12 +174,21 @@ func cmdList(args []string) error {
 
 func cmdLast(args []string) error {
 	n := 1
-	if len(args) > 0 {
-		v, err := strconv.Atoi(args[0])
-		if err != nil || v < 1 {
-			return fmt.Errorf("last: expected a positive integer, got %q", args[0])
+	cli := ""
+	for _, a := range args {
+		switch a {
+		case "claude", "codex":
+			if cli != "" {
+				return fmt.Errorf("last: agent specified twice (%q and %q)", cli, a)
+			}
+			cli = a
+		default:
+			v, err := strconv.Atoi(a)
+			if err != nil || v < 1 {
+				return fmt.Errorf("last: expected a positive integer or agent (claude|codex), got %q", a)
+			}
+			n = v
 		}
-		n = v
 	}
 	info, err := snapshotRepo()
 	if err != nil {
@@ -190,12 +200,16 @@ func cmdLast(args []string) error {
 	}
 	defer db.Close()
 
-	rows, err := listSessions(db, listFilter{Repo: info.Repo, Branch: info.Branch})
+	rows, err := listSessions(db, listFilter{Repo: info.Repo, Branch: info.Branch, CLI: cli})
 	if err != nil {
 		return err
 	}
 	if len(rows) == 0 {
-		return fmt.Errorf("no sessions on %s@%s", shortRepo(info.Repo), info.Branch)
+		where := fmt.Sprintf("%s@%s", shortRepo(info.Repo), info.Branch)
+		if cli != "" {
+			where = cli + " on " + where
+		}
+		return fmt.Errorf("no sessions for %s", where)
 	}
 	if n > len(rows) {
 		return fmt.Errorf("only %d session(s) on this branch", len(rows))
