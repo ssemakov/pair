@@ -24,10 +24,12 @@ Make sure `~/bin` (or wherever you installed) is on your `PATH`.
 pair [-v|--verbose] codex [args...]   wrap codex, capture session
 pair [-v|--verbose] claude [args...]  wrap claude, capture session
 
-pair list [--here|--repo|--branch=N]  list sessions
+pair list [--here|--repo|--branch=N] [claude|codex]
+                                      list sessions, optionally filtered by agent
 pair last [n] [claude|codex]          resume the n-th most-recent session on
-                                      this repo+branch (default 1),
-                                      optionally filtered by agent
+                                      this repo+branch (default 1), optionally
+                                      filtered by agent. n indexes the same
+                                      filtered view list would print
 pair resume <id>                      resume by pair-id or cli-session-id
 pair register --cli C --session S     insert a session manually
 pair forget <id>                      remove a session from the index
@@ -56,17 +58,23 @@ When the session exits, `pair` records:
 ### Listing & resuming
 
 ```sh
-pair list --here          # this repo + this branch
-pair list --repo          # this repo, any branch
-pair list --branch=feat-x # any repo, this branch
+pair list --here              # this repo + this branch
+pair list --repo              # this repo, any branch
+pair list --branch=feat-x     # any repo, this branch
+pair list --here claude       # this repo + branch, claude only
 
-pair last                 # resume the newest session for this repo+branch
-pair last 2               # resume the 2nd-newest
-pair last claude          # only consider claude sessions
-pair last 2 codex         # 2nd-newest codex session
+pair last                     # resume the newest session for this repo+branch
+pair last 2                   # resume the 2nd-newest
+pair last claude              # only consider claude sessions
+pair last 2 codex             # 2nd-newest codex session
 
 pair resume <pair-id-or-cli-session-id>
 ```
+
+The number `n` in `pair last n [agent]` always indexes into the filtered view
+that `pair list --here [agent]` would print, so the row numbers you see in
+`pair list --here claude` are the same numbers you can pass to
+`pair last n claude`.
 
 `resume` and `last` invoke the CLI with the spelling each tool expects:
 `claude --resume <id>` and `codex resume <id>`. The resumed run is itself

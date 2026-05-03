@@ -18,9 +18,11 @@ usage:
   pair [-v|--verbose] codex [args...]  wrap codex, capture session
   pair [-v|--verbose] claude [args...] wrap claude, capture session
 
-  pair list [--here|--repo|--branch=N] list sessions
+  pair list [--here|--repo|--branch=N] [claude|codex]
+                                       list sessions, optionally filtered by agent
   pair last [n] [claude|codex]         resume the n-th most-recent session on this repo+branch (default 1),
-                                       optionally filtered by agent
+                                       optionally filtered by agent. n indexes the same filtered
+                                       view that 'pair list --here [claude|codex]' would print.
   pair resume <id>                     resume by pair-id or cli-session-id
   pair register --cli C --session S    insert a session manually
   pair forget <id>                     remove a session from the index
@@ -164,12 +166,19 @@ func cmdWrap(cli string, args []string) error {
 }
 
 func cmdList(args []string) error {
+	cli, rest, err := extractAgent(args)
+	if err != nil {
+		return fmt.Errorf("list: %v", err)
+	}
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	here := fs.Bool("here", false, "current repo + current branch")
 	repoOnly := fs.Bool("repo", false, "current repo, any branch")
 	branch := fs.String("branch", "", "filter by branch")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(rest); err != nil {
 		return err
+	}
+	if extra := fs.Args(); len(extra) > 0 {
+		return fmt.Errorf("list: unexpected argument %q", extra[0])
 	}
 
 	db, err := openIndex()
@@ -178,7 +187,7 @@ func cmdList(args []string) error {
 	}
 	defer db.Close()
 
-	f := listFilter{}
+	f := listFilter{CLI: cli}
 	if *here || *repoOnly || *branch != "" {
 		info, gerr := snapshotRepo()
 		if *here || *repoOnly {
@@ -202,23 +211,38 @@ func cmdList(args []string) error {
 	return nil
 }
 
-func cmdLast(args []string) error {
-	n := 1
+// extractAgent pulls an optional `claude` / `codex` token out of a positional
+// arg list. It returns the agent (or "") and the remaining args in order.
+// Errors if the agent is specified more than once.
+func extractAgent(args []string) (string, []string, error) {
 	cli := ""
+	rest := make([]string, 0, len(args))
 	for _, a := range args {
 		switch a {
 		case "claude", "codex":
 			if cli != "" {
-				return fmt.Errorf("last: agent specified twice (%q and %q)", cli, a)
+				return "", nil, fmt.Errorf("agent specified twice (%q and %q)", cli, a)
 			}
 			cli = a
 		default:
-			v, err := strconv.Atoi(a)
-			if err != nil || v < 1 {
-				return fmt.Errorf("last: expected a positive integer or agent (claude|codex), got %q", a)
-			}
-			n = v
+			rest = append(rest, a)
 		}
+	}
+	return cli, rest, nil
+}
+
+func cmdLast(args []string) error {
+	cli, rest, err := extractAgent(args)
+	if err != nil {
+		return fmt.Errorf("last: %v", err)
+	}
+	n := 1
+	for _, a := range rest {
+		v, err := strconv.Atoi(a)
+		if err != nil || v < 1 {
+			return fmt.Errorf("last: expected a positive integer or agent (claude|codex), got %q", a)
+		}
+		n = v
 	}
 	info, err := snapshotRepo()
 	if err != nil {
@@ -234,15 +258,15 @@ func cmdLast(args []string) error {
 	if err != nil {
 		return err
 	}
+	scope := fmt.Sprintf("%s@%s", shortRepo(info.Repo), info.Branch)
+	if cli != "" {
+		scope = cli + " on " + scope
+	}
 	if len(rows) == 0 {
-		where := fmt.Sprintf("%s@%s", shortRepo(info.Repo), info.Branch)
-		if cli != "" {
-			where = cli + " on " + where
-		}
-		return fmt.Errorf("no sessions for %s", where)
+		return fmt.Errorf("no sessions for %s", scope)
 	}
 	if n > len(rows) {
-		return fmt.Errorf("only %d session(s) on this branch", len(rows))
+		return fmt.Errorf("only %d %s session(s)", len(rows), scope)
 	}
 	printSessions(rows)
 	pick := rows[n-1]
