@@ -73,7 +73,7 @@ func TestSessionScannerCapturesLastMatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := newSessionScanner(pat)
+	s := newSessionScanner(pat, nil)
 	chunks := []string{
 		"banner Session ID: 11111111-1111-1111-1111-111111111111\n",
 		"some other output\n",
@@ -94,7 +94,7 @@ func TestSessionScannerHandlesSplitWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := newSessionScanner(pat)
+	s := newSessionScanner(pat, nil)
 	full := "To continue this session, run codex resume 019de826-c84c-7041-b2af-b74d45c8c2cb\n"
 	for i := 0; i < len(full); i++ {
 		if _, err := s.Write([]byte{full[i]}); err != nil {
@@ -111,7 +111,7 @@ func TestSessionScannerTailTruncation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := newSessionScanner(pat)
+	s := newSessionScanner(pat, nil)
 	// Push more than maxTail of noise, then a match. The match should still be captured.
 	noise := strings.Repeat("x", 128*1024)
 	if _, err := s.Write([]byte(noise)); err != nil {

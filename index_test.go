@@ -6,6 +6,8 @@ import (
 	"sort"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 func openTestDB(t *testing.T) *sql.DB {
@@ -201,6 +203,147 @@ func TestDeleteSession(t *testing.T) {
 	}
 	if _, err := findSession(db, id); err == nil {
 		t.Error("session still present after delete")
+	}
+}
+
+func TestMigrationAddsUpdatedAtColumn(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PAIR_DATA_DIR", dir)
+	path, err := indexPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Build an "old" DB without updated_at.
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`CREATE TABLE sessions (
+		id TEXT PRIMARY KEY,
+		cli TEXT NOT NULL,
+		cli_session_id TEXT NOT NULL,
+		repo TEXT NOT NULL,
+		branch TEXT NOT NULL,
+		pr_url TEXT,
+		started_at INTEGER NOT NULL
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	startTs := time.Now().Add(-2 * time.Hour).Unix()
+	if _, err := old.Exec(
+		`INSERT INTO sessions (id, cli, cli_session_id, repo, branch, started_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		"old1", "claude", "ccs1", "/r1", "main", startTs,
+	); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	// Open via openIndex to trigger migration.
+	db, err := openIndex()
+	if err != nil {
+		t.Fatalf("openIndex post-migration: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	cols, err := tableColumns(db, "sessions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cols["updated_at"] {
+		t.Fatal("updated_at column missing after migration")
+	}
+
+	s, err := findSession(db, "old1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.UpdatedAt.Unix() != startTs {
+		t.Errorf("updated_at = %d, want %d (backfilled to started_at)", s.UpdatedAt.Unix(), startTs)
+	}
+
+	// Re-running migration should be a no-op (idempotent).
+	if err := migrate(db); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+}
+
+func TestInsertSessionDefaultsUpdatedAtToStartedAt(t *testing.T) {
+	db := openTestDB(t)
+	st := time.Now().Add(-1 * time.Hour)
+	s := Session{
+		ID: "x", CLI: "claude", CLISessionID: "cs", Repo: "/r", Branch: "main",
+		StartedAt: st,
+	}
+	if err := insertSession(db, s); err != nil {
+		t.Fatal(err)
+	}
+	got, err := findSession(db, "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.UpdatedAt.Unix() != st.Unix() {
+		t.Errorf("UpdatedAt = %v, want %v", got.UpdatedAt, st)
+	}
+}
+
+func TestTouchSessionBumpsUpdatedAt(t *testing.T) {
+	db := openTestDB(t)
+	id := seed(t, db, "claude", "/r", "main", -60)
+	before, err := findSession(db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bump := time.Now()
+	if err := touchSession(db, id, bump); err != nil {
+		t.Fatal(err)
+	}
+	after, err := findSession(db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.UpdatedAt.Unix() != bump.Unix() {
+		t.Errorf("UpdatedAt = %v, want %v", after.UpdatedAt, bump)
+	}
+	if !after.StartedAt.Equal(before.StartedAt) {
+		t.Errorf("StartedAt drifted: %v -> %v", before.StartedAt, after.StartedAt)
+	}
+}
+
+func TestListSessionsOrderByUpdated(t *testing.T) {
+	db := openTestDB(t)
+	// Three sessions: A is newest by started_at, B oldest, C in the middle.
+	a := seed(t, db, "claude", "/r", "main", -1)
+	b := seed(t, db, "claude", "/r", "main", -30)
+	c := seed(t, db, "claude", "/r", "main", -10)
+
+	// Now bump B to be the newest by updated_at.
+	if err := touchSession(db, b, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// And bump C to a slightly-earlier point.
+	if err := touchSession(db, c, time.Now().Add(-30*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	rowsByStarted, err := listSessions(db, listFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rowsByStarted) != 3 || rowsByStarted[0].ID != a {
+		t.Fatalf("started ordering wrong: %+v", ids(rowsByStarted))
+	}
+
+	rowsByUpdated, err := listSessions(db, listFilter{OrderByUpdated: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rowsByUpdated) != 3 ||
+		rowsByUpdated[0].ID != b ||
+		rowsByUpdated[1].ID != c ||
+		rowsByUpdated[2].ID != a {
+		t.Fatalf("updated ordering wrong: got %v, want [%s %s %s]",
+			ids(rowsByUpdated), b, c, a)
 	}
 }
 

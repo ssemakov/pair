@@ -58,7 +58,13 @@ func toUpperASCII(s string) string {
 
 // runWrapped spawns `cli args...` under a PTY, tees its output to the user's
 // terminal while scanning for the CLI's session id, and returns it on exit.
-func runWrapped(cli string, args []string) (string, error) {
+//
+// onCapture, if non-nil, is invoked exactly once — the first time the
+// scanner locks onto a session id. It runs in the scanner goroutine, so it
+// must be safe to call from there. The callback exists so callers can
+// persist the session row mid-stream, before the wrapped CLI exits, so a
+// SIGKILL (e.g. tmux server restart) doesn't lose the row.
+func runWrapped(cli string, args []string, onCapture func(string)) (string, error) {
 	if _, err := exec.LookPath(cli); err != nil {
 		return "", fmt.Errorf("%s: not found in PATH", cli)
 	}
@@ -103,7 +109,7 @@ func runWrapped(cli string, args []string) (string, error) {
 	go func() { _, _ = io.Copy(ptmx, os.Stdin) }()
 
 	// pty → (stdout + scanner)
-	scanner := newSessionScanner(pat)
+	scanner := newSessionScanner(pat, onCapture)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -131,31 +137,42 @@ func runWrapped(cli string, args []string) (string, error) {
 // the CLI prints the id multiple times. We keep scanning until EOF since
 // some CLIs print the id only on exit.
 type sessionScanner struct {
-	mu      sync.Mutex
-	pat     *regexp.Regexp
-	tail    []byte
-	maxTail int
-	last    string
+	mu        sync.Mutex
+	pat       *regexp.Regexp
+	tail      []byte
+	maxTail   int
+	last      string
+	onCapture func(string)
+	fired     bool
 }
 
-func newSessionScanner(pat *regexp.Regexp) *sessionScanner {
-	return &sessionScanner{pat: pat, maxTail: 64 * 1024}
+func newSessionScanner(pat *regexp.Regexp, onCapture func(string)) *sessionScanner {
+	return &sessionScanner{pat: pat, maxTail: 64 * 1024, onCapture: onCapture}
 }
 
 func (s *sessionScanner) Write(p []byte) (int, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.tail = append(s.tail, p...)
 	if len(s.tail) > s.maxTail {
 		s.tail = s.tail[len(s.tail)-s.maxTail:]
 	}
 	// Find the last match in the current buffer.
+	var firstCapture string
 	if m := s.pat.FindAllSubmatch(s.tail, -1); len(m) > 0 {
 		newID := string(m[len(m)-1][1])
 		if newID != s.last {
 			debugf("session-id captured: %s", newID)
 			s.last = newID
 		}
+		if !s.fired && s.onCapture != nil {
+			s.fired = true
+			firstCapture = newID
+		}
+	}
+	cb := s.onCapture
+	s.mu.Unlock()
+	if firstCapture != "" && cb != nil {
+		cb(firstCapture)
 	}
 	return len(p), nil
 }

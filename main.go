@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -18,11 +19,14 @@ usage:
   pair [-v|--verbose] codex [args...]  wrap codex, capture session
   pair [-v|--verbose] claude [args...] wrap claude, capture session
 
-  pair list [--here|--repo|--branch=N] [claude|codex]
-                                       list sessions, optionally filtered by agent
-  pair last [n] [claude|codex]         resume the n-th most-recent session on this repo+branch (default 1),
+  pair list [--here|--repo|--branch=N] [--updated] [claude|codex]
+                                       list sessions, optionally filtered by agent.
+                                       --updated orders by last-resumed time instead of start time.
+  pair last [n] [--updated] [claude|codex]
+                                       resume the n-th most-recent session on this repo+branch (default 1),
                                        optionally filtered by agent. n indexes the same filtered
                                        view that 'pair list --here [claude|codex]' would print.
+                                       --updated orders by last-resumed time.
   pair resume <id>                     resume by pair-id or cli-session-id
   pair register --cli C --session S    insert a session manually
   pair forget <id>                     remove a session from the index
@@ -35,12 +39,18 @@ usage:
 
 global flags:
   -v, --verbose        emit debug output to stderr (also: PAIR_VERBOSE=1)
+  -V, --version        print version and exit (also: 'pair version')
 
 env:
   PAIR_DATA_DIR        override storage dir (default: $XDG_DATA_HOME/pair or ~/.local/share/pair)
   PAIR_<CLI>_PATTERN   override the regex used to scrape the session id from <CLI>'s stdout
   PAIR_VERBOSE         if set to a non-empty value, behaves like --verbose
 `
+
+// version is the build version string. Set at build time via:
+//   go build -ldflags "-X main.version=$(git describe --tags --always --dirty)"
+// Defaults to "dev" for plain `go build`.
+var version = "dev"
 
 var verbose bool
 
@@ -79,9 +89,13 @@ func main() {
 	}
 	rest := make([]string, 0, len(os.Args)-1)
 	for _, a := range os.Args[1:] {
-		if a == "-v" || a == "--verbose" {
+		switch a {
+		case "-v", "--verbose":
 			verbose = true
 			continue
+		case "-V", "--version":
+			fmt.Println(version)
+			return
 		}
 		rest = append(rest, a)
 	}
@@ -111,6 +125,9 @@ func main() {
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return
+	case "version":
+		fmt.Println(version)
+		return
 	default:
 		fmt.Fprintf(os.Stderr, "pair: unknown command %q\n\n%s", cmd, usage)
 		os.Exit(2)
@@ -130,9 +147,48 @@ func cmdWrap(cli string, args []string) error {
 	}
 	debugf("repo=%s branch=%s pr_url=%q", info.Repo, info.Branch, info.PRURL)
 
+	db, err := openIndex()
+	if err != nil {
+		// Without an index we can't record anything; still run the CLI so
+		// the user isn't blocked.
+		fmt.Fprintf(os.Stderr, "pair: open index: %v — running %s without indexing\n", err, cli)
+		return execPassthrough(cli, args)
+	}
+	defer db.Close()
+
 	startedAt := time.Now()
+	var (
+		mu     sync.Mutex
+		pairID string
+	)
+	onCapture := func(id string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if pairID != "" {
+			return
+		}
+		newID := uuid.NewString()
+		s := Session{
+			ID:           newID,
+			CLI:          cli,
+			CLISessionID: id,
+			Repo:         info.Repo,
+			Branch:       info.Branch,
+			PRURL:        info.PRURL,
+			StartedAt:    startedAt,
+			UpdatedAt:    startedAt,
+		}
+		if err := insertSession(db, s); err != nil {
+			fmt.Fprintf(os.Stderr, "pair: insert session: %v\n", err)
+			return
+		}
+		pairID = newID
+		debugf("inserted session pair_id=%s cli_session_id=%s", pairID, id)
+		fmt.Fprintf(os.Stderr, "pair: indexed %s session %s on %s@%s\n", cli, id, shortRepo(info.Repo), info.Branch)
+	}
+
 	debugf("launching %s with %d args", cli, len(args))
-	cliSessionID, runErr := runWrapped(cli, args)
+	cliSessionID, runErr := runWrapped(cli, args, onCapture)
 	debugf("wrapped %s exited: session_id=%q err=%v elapsed=%s", cli, cliSessionID, runErr, time.Since(startedAt))
 
 	if cliSessionID == "" {
@@ -140,28 +196,16 @@ func cmdWrap(cli string, args []string) error {
 		return runErr
 	}
 
-	db, err := openIndex()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "pair: open index: %v (session id %s left unindexed)\n", err, cliSessionID)
-		return runErr
+	mu.Lock()
+	pid := pairID
+	mu.Unlock()
+	if pid != "" {
+		if err := touchSession(db, pid, time.Now()); err != nil {
+			fmt.Fprintf(os.Stderr, "pair: bump updated_at: %v\n", err)
+		} else {
+			debugf("bumped updated_at for pair_id=%s", pid)
+		}
 	}
-	defer db.Close()
-
-	s := Session{
-		ID:           uuid.NewString(),
-		CLI:          cli,
-		CLISessionID: cliSessionID,
-		Repo:         info.Repo,
-		Branch:       info.Branch,
-		PRURL:        info.PRURL,
-		StartedAt:    startedAt,
-	}
-	if err := insertSession(db, s); err != nil {
-		fmt.Fprintf(os.Stderr, "pair: insert session: %v\n", err)
-		return runErr
-	}
-	debugf("inserted session pair_id=%s", s.ID)
-	fmt.Fprintf(os.Stderr, "pair: indexed %s session %s on %s@%s\n", cli, cliSessionID, shortRepo(info.Repo), info.Branch)
 	return runErr
 }
 
@@ -174,6 +218,7 @@ func cmdList(args []string) error {
 	here := fs.Bool("here", false, "current repo + current branch")
 	repoOnly := fs.Bool("repo", false, "current repo, any branch")
 	branch := fs.String("branch", "", "filter by branch")
+	updated := fs.Bool("updated", false, "order by updated_at instead of started_at")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -187,7 +232,7 @@ func cmdList(args []string) error {
 	}
 	defer db.Close()
 
-	f := listFilter{CLI: cli}
+	f := listFilter{CLI: cli, OrderByUpdated: *updated}
 	if *here || *repoOnly || *branch != "" {
 		info, gerr := snapshotRepo()
 		if *here || *repoOnly {
@@ -236,11 +281,20 @@ func cmdLast(args []string) error {
 	if err != nil {
 		return fmt.Errorf("last: %v", err)
 	}
-	n := 1
+	updated := false
+	rest2 := make([]string, 0, len(rest))
 	for _, a := range rest {
+		if a == "--updated" || a == "-updated" {
+			updated = true
+			continue
+		}
+		rest2 = append(rest2, a)
+	}
+	n := 1
+	for _, a := range rest2 {
 		v, err := strconv.Atoi(a)
 		if err != nil || v < 1 {
-			return fmt.Errorf("last: expected a positive integer or agent (claude|codex), got %q", a)
+			return fmt.Errorf("last: expected a positive integer, agent (claude|codex), or --updated, got %q", a)
 		}
 		n = v
 	}
@@ -254,7 +308,7 @@ func cmdLast(args []string) error {
 	}
 	defer db.Close()
 
-	rows, err := listSessions(db, listFilter{Repo: info.Repo, Branch: info.Branch, CLI: cli})
+	rows, err := listSessions(db, listFilter{Repo: info.Repo, Branch: info.Branch, CLI: cli, OrderByUpdated: updated})
 	if err != nil {
 		return err
 	}
@@ -434,7 +488,8 @@ func resumeArgv(cli, sessionID string) []string {
 }
 
 // resumeExec runs the CLI's resume invocation under a PTY so we can scan
-// for an updated session id on exit and index it if it's not already known.
+// for an updated session id on exit, bump updated_at, and index it if it's
+// not already known.
 func resumeExec(s Session) error {
 	if _, err := exec.LookPath(s.CLI); err != nil {
 		return fmt.Errorf("%s: not found in PATH", s.CLI)
@@ -443,7 +498,7 @@ func resumeExec(s Session) error {
 	debugf("wrap-resume %v", argv)
 
 	startedAt := time.Now()
-	captured, runErr := runWrapped(s.CLI, argv[1:])
+	captured, runErr := runWrapped(s.CLI, argv[1:], nil)
 	debugf("resume exited: captured_session_id=%q err=%v elapsed=%s", captured, runErr, time.Since(startedAt))
 
 	newID := captured
@@ -453,13 +508,17 @@ func resumeExec(s Session) error {
 
 	db, err := openIndex()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "pair: open index: %v (resumed session %s left unindexed)\n", err, newID)
+		fmt.Fprintf(os.Stderr, "pair: open index: %v (resumed session %s left untouched)\n", err, newID)
 		return runErr
 	}
 	defer db.Close()
 
-	if _, err := findSession(db, newID); err == nil {
-		debugf("resumed session %s already indexed", newID)
+	if existing, err := findSession(db, newID); err == nil {
+		if err := touchSession(db, existing.ID, time.Now()); err != nil {
+			fmt.Fprintf(os.Stderr, "pair: bump updated_at: %v\n", err)
+		} else {
+			debugf("bumped updated_at for resumed pair_id=%s", existing.ID)
+		}
 		return runErr
 	}
 
@@ -474,6 +533,7 @@ func resumeExec(s Session) error {
 		Repo:         s.Repo,
 		Branch:       s.Branch,
 		StartedAt:    startedAt,
+		UpdatedAt:    time.Now(),
 	}
 	if err := insertSession(db, ns); err != nil {
 		fmt.Fprintf(os.Stderr, "pair: insert resumed session: %v\n", err)
