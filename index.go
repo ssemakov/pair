@@ -111,6 +111,13 @@ func touchSession(db *sql.DB, pairID string, t time.Time) error {
 	return err
 }
 
+// updatePRURL sets pr_url on the session with the given pair id. An empty
+// url is stored as NULL.
+func updatePRURL(db *sql.DB, pairID, url string) error {
+	_, err := db.Exec(`UPDATE sessions SET pr_url = ? WHERE id = ?`, nullIfEmpty(url), pairID)
+	return err
+}
+
 func deleteSession(db *sql.DB, id string) (int64, error) {
 	res, err := db.Exec(`DELETE FROM sessions WHERE id = ? OR cli_session_id = ?`, id, id)
 	if err != nil {

@@ -145,7 +145,20 @@ func cmdWrap(cli string, args []string) error {
 		fmt.Fprintf(os.Stderr, "pair: %v — running %s without indexing\n", err, cli)
 		return execPassthrough(cli, args)
 	}
-	debugf("repo=%s branch=%s pr_url=%q", info.Repo, info.Branch, info.PRURL)
+	debugf("repo=%s branch=%s", info.Repo, info.Branch)
+
+	// Kick off the GitHub PR lookup in parallel. `gh` may take a few seconds
+	// (network), and some repos have no matching PR or aren't on GitHub at
+	// all — both yield "" here without holding up the wrap. The buffered
+	// channel guarantees the goroutine never blocks on send, even if we
+	// never read (e.g. the wrap fails before we ever insert a row).
+	prDone := make(chan string, 1)
+	go func() {
+		debugf("gh pr lookup starting for branch %q", info.Branch)
+		url := lookupPRURL(info.Branch)
+		debugf("gh pr lookup returned %q", url)
+		prDone <- url
+	}()
 
 	db, err := openIndex()
 	if err != nil {
@@ -174,7 +187,6 @@ func cmdWrap(cli string, args []string) error {
 			CLISessionID: id,
 			Repo:         info.Repo,
 			Branch:       info.Branch,
-			PRURL:        info.PRURL,
 			StartedAt:    startedAt,
 			UpdatedAt:    startedAt,
 		}
@@ -204,6 +216,22 @@ func cmdWrap(cli string, args []string) error {
 			fmt.Fprintf(os.Stderr, "pair: bump updated_at: %v\n", err)
 		} else {
 			debugf("bumped updated_at for pair_id=%s", pid)
+		}
+		// Non-blocking read: in the common case the wrap was running long
+		// enough that gh already finished and the value is sitting in the
+		// buffer. If it isn't, we drop it — losing pr_url on tiny sessions
+		// is fine.
+		select {
+		case url := <-prDone:
+			if url != "" {
+				if err := updatePRURL(db, pid, url); err != nil {
+					debugf("update pr_url failed: %v", err)
+				} else {
+					debugf("set pr_url=%q for pair_id=%s", url, pid)
+				}
+			}
+		default:
+			debugf("gh pr lookup not ready at exit; skipping pr_url update")
 		}
 	}
 	return runErr

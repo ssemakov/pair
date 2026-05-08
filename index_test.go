@@ -287,6 +287,43 @@ func TestInsertSessionDefaultsUpdatedAtToStartedAt(t *testing.T) {
 	}
 }
 
+func TestUpdatePRURL(t *testing.T) {
+	db := openTestDB(t)
+	id := seed(t, db, "claude", "/r", "main", -5)
+
+	// Initially empty.
+	got, err := findSession(db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PRURL != "" {
+		t.Fatalf("expected empty pr_url, got %q", got.PRURL)
+	}
+
+	if err := updatePRURL(db, id, "https://github.com/o/r/pull/1"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = findSession(db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PRURL != "https://github.com/o/r/pull/1" {
+		t.Fatalf("pr_url = %q, want set", got.PRURL)
+	}
+
+	// Empty string should clear it (stored as NULL).
+	if err := updatePRURL(db, id, ""); err != nil {
+		t.Fatal(err)
+	}
+	got, err = findSession(db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PRURL != "" {
+		t.Fatalf("pr_url not cleared: %q", got.PRURL)
+	}
+}
+
 func TestTouchSessionBumpsUpdatedAt(t *testing.T) {
 	db := openTestDB(t)
 	id := seed(t, db, "claude", "/r", "main", -60)
