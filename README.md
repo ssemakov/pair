@@ -5,18 +5,21 @@ they ran on, so you can resume the right one later instead of digging through
 shell history.
 
 It works by wrapping the underlying CLI under a PTY, scraping its session id
-from the output, and indexing `(cli, cli_session_id, repo, branch, started_at)`
-into a small SQLite database.
+from the output, and indexing `(cli, cli_session_id, repo, branch,
+started_at, updated_at, pr_url)` into a small SQLite database.
 
 ## Install
 
 ```sh
-make install            # builds and copies the `pair` binary to ~/bin
-# or:
+make install            # builds ./bin/pair and copies it to ~/bin/pair
+# or, just build:
+make build              # produces ./bin/pair
+# or, via go directly (no version embedded):
 go install ./...
 ```
 
-Make sure `~/bin` (or wherever you installed) is on your `PATH`.
+Make sure `~/bin` (or wherever you installed) is on your `PATH`. Set
+`PREFIX` to install elsewhere: `make install PREFIX=/usr/local`.
 
 ## Usage
 
@@ -72,12 +75,17 @@ As soon as the wrapped CLI prints its session id, `pair` records:
 
 - the CLI's own session id (scraped from its output)
 - the absolute repo path and current branch
-- the open PR url for that branch, if `gh` is installed
 - `started_at` and `updated_at` timestamps
 
 The row is inserted **at session-id capture time, not at exit**, so a
 SIGKILL (e.g. tmux server restart) doesn't lose the session. When the run
 exits cleanly, `updated_at` is bumped to the exit time.
+
+If `gh` is installed and authed, the PR URL for the current branch is
+fetched in a background goroutine and stitched onto the row when the
+session exits. The lookup never blocks the wrap launch, and a missing PR
+or non-GitHub repo is silently fine. On extremely short sessions where
+`gh` hasn't returned by exit, `pr_url` simply stays empty.
 
 ### Listing & resuming
 
@@ -160,13 +168,19 @@ It's safe to delete the file; the next wrapped run will recreate it.
 ## Development
 
 ```sh
-make build              # build the binary; embeds `git describe` as the version
+make build              # build ./bin/pair; embeds `git describe` as the version
 make test               # run tests
 make fmt vet            # formatting / static checks
 make tidy               # go mod tidy
+make clean              # rm -rf ./bin
 ```
 
-Override the version manually with `make build VERSION=1.2.3`.
+Override the version manually with `make build VERSION=1.2.3`. Verify it
+with `./bin/pair --version` or `pair version`.
 
 Tests live alongside the source (`*_test.go`) and use a temp `PAIR_DATA_DIR`,
 so they don't touch your real session index.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

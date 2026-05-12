@@ -1,4 +1,6 @@
 BINARY := pair
+BINDIR := bin
+BIN := $(BINDIR)/$(BINARY)
 PREFIX ?= ~
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -X main.version=$(VERSION)
@@ -8,13 +10,14 @@ LDFLAGS := -X main.version=$(VERSION)
 all: build
 
 build:
-	go build -ldflags "$(LDFLAGS)" -o $(BINARY) .
+	@mkdir -p $(BINDIR)
+	go build -ldflags "$(LDFLAGS)" -o $(BIN) .
 
 install: build
-	install -m 0755 $(BINARY) $(PREFIX)/bin/$(BINARY)
+	install -m 0755 $(BIN) $(PREFIX)/bin/$(BINARY)
 
 clean:
-	rm -f $(BINARY)
+	rm -rf $(BINDIR)
 
 test:
 	go test ./...

@@ -1,4 +1,4 @@
-/pair
+/bin/
 *.test
 *.out
 .DS_Store
